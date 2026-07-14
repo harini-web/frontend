@@ -62,7 +62,9 @@ function TerminalPanel({ tab, onLog, onUpdateConnected }) {
     const logRef      = useRef(null);
 
     useEffect(() => {
-        getProtocols().then(r => setProtocols(r.data)).catch(() => {});
+        getProtocols().then(r => setProtocols(r.data)).catch((err) => {
+            console.warn("[DEBUG] Failed to load protocols:", err.message);
+        });
     }, []);
 
     useEffect(() => {
@@ -75,38 +77,50 @@ function TerminalPanel({ tab, onLog, onUpdateConnected }) {
 
         let active = true;
         setReading(true);
+        console.log(`[DEBUG] Initializing readLoop for tab: ${tab.id}`);
 
         const readLoop = async () => {
             try {
                 while (active && tab.port.readable) {
+                    console.log(`[DEBUG] Port is readable. Acquiring reader lock...`);
                     readerRef.current = tab.port.readable.getReader();
                     try {
                         while (active) {
                             const { value, done } = await readerRef.current.read();
-                            if (done) break;
+                            if (done) {
+                                console.log("[DEBUG] Reader reported done (Port closed/disconnected). Exiting loop.");
+                                active = false; // ✨ CRITICAL FIX: Ensure outer loop breaks too so CPU doesn't freeze
+                                break;
+                            }
                             if (value && value.length > 0) {
+                                console.log(`[DEBUG] RX Raw Uint8Array:`, value);
                                 const hex = Array.from(value)
                                     .map(b => b.toString(16).toUpperCase().padStart(2, '0'))
                                     .join(' ');
+
                                 setLastResponse(hex);
                                 setPacketStatus('Response received');
                                 onLog(tab.id, 'RX: ' + hex);
                             }
                         }
                     } finally {
+                        console.log("[DEBUG] Releasing reader lock...");
                         try { readerRef.current?.releaseLock(); } catch {}
                         readerRef.current = null;
                     }
                 }
             } catch (e) {
+                console.error('[DEBUG] FATAL READ ERROR:', e);
                 if (active) onLog(tab.id, 'Read ended: ' + e.message);
             }
             setReading(false);
+            console.log("[DEBUG] Exited readLoop completely.");
         };
 
         readLoop();
 
         return () => {
+            console.log(`[DEBUG] Cleaning up readLoop for tab: ${tab.id}`);
             active = false;
             try { readerRef.current?.cancel(); readerRef.current?.releaseLock(); } catch {}
         };
@@ -114,24 +128,34 @@ function TerminalPanel({ tab, onLog, onUpdateConnected }) {
 
     // ── Write bytes to serial port ────────────────────────────────────
     const sendBytes = async (bytes) => {
+        console.log(`[DEBUG] Preparing to send bytes:`, bytes);
         if (!tab.port || !tab.connected) {
+            console.warn("[DEBUG] Aborted send: No device connected");
             setPacketStatus('❌ No device connected');
             return;
         }
-        // Release reader lock temporarily to allow write
-        try { await readerRef.current?.cancel(); } catch {}
+
+        // ✨ CRITICAL FIX: Removed the `readerRef.current?.cancel()` call.
+        // Web Serial is full-duplex. Canceling the reader to write breaks the input stream and triggers the freeze!
 
         const hexStr = bytes.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
         setPacketStatus('Sending…');
         onLog(tab.id, 'TX: ' + hexStr);
 
         try {
+            console.log("[DEBUG] Acquiring writer lock...");
             const writer = tab.port.writable.getWriter();
-            await writer.write(new Uint8Array(bytes));
+            const dataArray = new Uint8Array(bytes);
+            console.log("[DEBUG] Sending Uint8Array:", dataArray);
+
+            await writer.write(dataArray);
+
+            console.log("[DEBUG] Write complete. Releasing lock.");
             writer.releaseLock();
             setPacketStatus('✔ Packet sent — waiting for response');
             onLog(tab.id, 'TX sent OK');
         } catch (err) {
+            console.error("[DEBUG] Send failed violently:", err);
             setPacketStatus('❌ Send failed: ' + err.message);
             onLog(tab.id, 'TX ERROR: ' + err.message);
         }
@@ -298,7 +322,9 @@ function TerminalPanel({ tab, onLog, onUpdateConnected }) {
             <div style={S.termRight}>
                 <div style={S.clHeader}>
                     <span style={{ ...S.tpLabel, marginBottom:0 }}>Communication Log</span>
-                    <button style={S.clClear} onClick={() => {}}>Clear</button>
+                    <button style={S.clClear} onClick={() => {
+                        onLog(tab.id, '--- LOG CLEARED ---');
+                    }}>Clear</button>
                 </div>
                 <div style={S.clEntries} ref={logRef}>
                     {tab.log.map((e, i) => (
@@ -331,23 +357,37 @@ export default function TerminalPage({ user, onLogout }) {
     useEffect(() => { loadSavedDevices(); }, []);
 
     const loadSavedDevices = async () => {
-        try { const r = await getDevices(); setSavedDevices(r.data); } catch {}
+        try {
+            const r = await getDevices();
+            setSavedDevices(r.data);
+        } catch (e) {
+            console.warn("[DEBUG] Failed to load saved devices", e);
+        }
     };
 
+    // ✨ CRITICAL PERFORMANCE FIX: Capping log array at 50 to prevent freezing
     const addLog = useCallback((tabId, msg) => {
+        console.log(`[UI LOG | Tab ${tabId}] ${msg}`); // Always log to Developer Console securely
         const ts = new Date().toTimeString().substring(0, 8);
-        setTabs(prev => prev.map(t =>
-            t.id === tabId ? { ...t, log: [...t.log, { ts, msg }] } : t
-        ));
+        setTabs(prev => prev.map(t => {
+            if (t.id === tabId) {
+                const newLogs = [...t.log, { ts, msg }];
+                // Capping the array at the 50 most recent logs to stop React from crashing
+                return { ...t, log: newLogs.slice(-50) };
+            }
+            return t;
+        }));
     }, []);
 
     // ── Scan ──────────────────────────────────────────────────────────
     const handleScan = async () => {
+        console.log(`[DEBUG] handleScan initiated for activeType: ${activeType}`);
         setScanning(true);
         setScannedDevices([]);
         setStatus('Scanning for BT devices…');
         try {
             const res = await startScan(); // [{name, deviceId, status}]
+            console.log("[DEBUG] API startScan response:", res.data);
             const list = (res.data || []).map((d, i) => ({
                 id:       `bt-${i}-${(d.deviceId || '').replace(/[^a-z0-9]/gi,'')}`,
                 name:     d.name,
@@ -356,7 +396,8 @@ export default function TerminalPage({ user, onLogout }) {
             }));
             setScannedDevices(list);
             setStatus(list.length > 0 ? `${list.length} device(s) found` : 'No devices found');
-        } catch {
+        } catch (err) {
+            console.error("[DEBUG] handleScan failed:", err);
             setStatus('Scan error — is backend running on port 8080?');
         } finally {
             setScanning(false);
@@ -365,12 +406,14 @@ export default function TerminalPage({ user, onLogout }) {
 
     // ── Connect → new tab ─────────────────────────────────────────────
     const handleConnect = async (device) => {
+        console.log(`[DEBUG] handleConnect clicked for device:`, device);
         setStatus(`Connecting to ${device.name}…`);
         try {
-            // IMPORTANT: Web Serial requestPort() opens a native OS popup
-            // showing COM ports — pick the COM port your BT device is paired to
+            console.log("[DEBUG] Awaiting Web Serial requestPort...");
             const port = await navigator.serial.requestPort();
+            console.log(`[DEBUG] Port selected. Opening at baudRate: ${baudRate}...`);
             await port.open({ baudRate: Number(baudRate) });
+            console.log("[DEBUG] Hardware Port OPENED successfully");
 
             const tabId = `tab-${Date.now()}`;
             const newTab = {
@@ -390,15 +433,19 @@ export default function TerminalPage({ user, onLogout }) {
 
             // Save to MySQL
             try {
+                console.log("[DEBUG] Saving connected device to database...");
                 await saveDevice({
                     deviceId:   device.deviceId || device.name,
                     deviceName: device.name,
                     deviceType: 'BT',
                 });
                 loadSavedDevices();
-            } catch {}
+            } catch (err) {
+                console.warn("[DEBUG] Failed to save device to DB:", err);
+            }
 
         } catch (err) {
+            console.error("[DEBUG] Port connection failed:", err);
             if (err.name !== 'NotFoundError') {
                 setStatus('Connect failed: ' + err.message);
             } else {
@@ -409,9 +456,11 @@ export default function TerminalPage({ user, onLogout }) {
 
     // ── Close tab ─────────────────────────────────────────────────────
     const handleCloseTab = async (tabId) => {
+        console.log(`[DEBUG] handleCloseTab for tab ID: ${tabId}`);
         const tab = tabs.find(t => t.id === tabId);
         if (tab?.port) {
-            try { await tab.port.close(); } catch {}
+            console.log("[DEBUG] Closing native serial port...");
+            try { await tab.port.close(); } catch (e) { console.error("[DEBUG] Port close error:", e) }
         }
         const rest = tabs.filter(t => t.id !== tabId);
         setTabs(rest);
