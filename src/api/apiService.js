@@ -3,9 +3,13 @@ import axios from 'axios';
 // Vite proxy forwards /api → http://localhost:8080
 const api = axios.create({ baseURL: '/api' });
 
-// ── Bluetooth ──────────────────────────────────────────────────────
-// Triggers OS-level BT Classic scan, returns list of "NAME | MAC" strings
-export const startScan    = ()           => api.post('/bluetooth/scan');
+// ── Bluetooth Scan APIs ───────────────────────────────────────────
+
+// Scan Bluetooth Classic Serial (COM/SPP) devices
+export const scanClassic = () => api.post('/bluetooth/scan/classic');
+
+// Scan Universal Bluetooth devices (headsets, phones, keyboards, etc.)
+export const scanUniversal = () => api.post('/bluetooth/scan/universal');
 
 // Returns all previously saved/paired devices from MySQL
 export const getDevices   = ()           => api.get('/bluetooth/devices');

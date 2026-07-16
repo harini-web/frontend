@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 // Restoring your actual API imports!
 // Ensure your '../api/apiService' file exists and is correctly routed.
-import { startScan, getDevices, saveDevice, deleteDevice, getProtocols } from '../api/apiService';
+import { scanClassic,scanUniversal, getDevices, saveDevice, deleteDevice, getProtocols } from '../api/apiService';
 
 // ─── ESC/POS helper — builds correct byte arrays for thermal printer ─────────
 const ESC = 0x1B;
@@ -64,7 +64,7 @@ function TerminalPanel({ tab, onLog }) {
     const [pbBytes, setPbBytes]           = useState([0x02, 0x27, 0x69, 0x01, 0x72, 0x73]);
     const [customHex, setCustomHex]       = useState('');
     const [customText, setCustomText]     = useState('');
-    const [packetStatus, setPacketStatus] = useState('Waiting for response...');
+    const [packetStatus, setPacketStatus] = useState('');
     const [lastResponse, setLastResponse] = useState('');
     const [protocols, setProtocols]       = useState([]);
     const [protocol, setProtocol]         = useState('');
@@ -231,7 +231,7 @@ function TerminalPanel({ tab, onLog }) {
                             <button key={a} style={S.pbBtn} onClick={() => handlePreset(a)}>{a}</button>
                         ))}
                     </div>
-                    <button style={S.btnSend} onClick={() => sendBytes(pbBytes)}>▶ Send Packet</button>
+                    <button style={S.btnSend} onClick={() => sendBytes(pbBytes)}>▶️ Send Packet</button>
                 </div>
 
                 <div style={S.tpSection}>
@@ -240,7 +240,7 @@ function TerminalPanel({ tab, onLog }) {
                     <input style={S.hexInput} placeholder="Type text to print..." value={customText}
                            onChange={e => setCustomText(e.target.value)}
                            onKeyDown={e => e.key === 'Enter' && handleSendCustomText()} />
-                    <button style={{ ...S.btnSend, marginTop:6, background:'#2e7d32' }} onClick={handleSendCustomText}>▶ Print Text</button>
+                    <button style={{ ...S.btnSend, marginTop:6, background:'#2e7d32' }} onClick={handleSendCustomText}>▶️ Print Text</button>
                 </div>
 
                 <div style={S.tpSection}>
@@ -249,7 +249,7 @@ function TerminalPanel({ tab, onLog }) {
                     <input style={S.hexInput} placeholder="8A C6 04" value={customHex}
                            onChange={e => setCustomHex(e.target.value.toUpperCase())}
                            onKeyDown={e => e.key === 'Enter' && handleSendCustomHex()} />
-                    <button style={{ ...S.btnSend, marginTop:6 }} onClick={handleSendCustomHex}>▶ Send Raw Hex</button>
+                    <button style={{ ...S.btnSend, marginTop:6 }} onClick={handleSendCustomHex}>▶️ Send Raw Hex</button>
                 </div>
             </div>
 
@@ -329,24 +329,50 @@ export default function TerminalPage({ user, onLogout }) {
 
     // ── Main Scan Hub ──
     const handleScan = async () => {
-        // Only pure BLE bypasses the UI grid completely.
-        if (activeType === 'ble') return handleBleConnect();
 
-        // ✨ FIX: BT Classic AND Universal now BOTH hit the Spring Boot backend
-        // to populate the native UI grid with Headsets, Speakers, Printers, etc!
+        // BLE uses Web Bluetooth directly
+        if (activeType === 'ble') {
+            return handleBleConnect();
+        }
+
         setScanning(true);
         setScannedDevices([]);
         setStatus('Fetching paired devices from Operating System…');
 
         try {
-            const res = await startScan();
+
+            let res;
+
+            if (activeType === 'classic') {
+                // Scan only Bluetooth Classic (COM/SPP) devices
+                res = await scanClassic();
+
+            } else if (activeType === 'universal') {
+                // Scan all paired Bluetooth devices
+                res = await scanUniversal();
+
+            } else {
+                setStatus('Unsupported scan type.');
+                return;
+            }
+
             const list = (res.data || []).map((d, i) => ({
-                id: `bt-${i}-${(d.deviceId || '').replace(/[^a-z0-9]/gi,'')}`,
-                name: d.name, deviceId: d.deviceId, status: d.status,
+                id: `bt-${i}-${(d.deviceId || '').replace(/[^a-z0-9]/gi, '')}`,
+                name: d.name,
+                deviceId: d.deviceId,
+                status: d.status,
             }));
+
             setScannedDevices(list);
-            setStatus(list.length > 0 ? `${list.length} device(s) found and listed below` : 'No devices found');
+
+            setStatus(
+                list.length > 0
+                    ? `${list.length} device(s) found and listed below`
+                    : 'No devices found'
+            );
+
         } catch (err) {
+            console.error(err);
             setStatus('Scan error — is Spring Boot backend running?');
         } finally {
             setScanning(false);
